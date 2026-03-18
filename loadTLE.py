@@ -34,6 +34,33 @@ def fetch_all_tle(session):
     
     print(f"All TLE data saved to {output_file}")
 
+def fetch_all_tle_days(session, days):
+    """
+    获取在days天内更新的所有全部在轨目标 TLE (3LE 格式)
+    来源: https://www.space-track.org/ (需要注册账号并登录)
+    """
+    # 输出保存目录 & 保存文件名称
+    OUTPUT_DIR = "data"
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    FILENAME = f"all_tle_{days}days.txt"
+
+    # Space-Track URL - 获取在days天内更新的最新在轨目标 TLE（3LE格式）
+    URL_ALL_TLE = f"https://www.space-track.org/basicspacedata/query/class/gp/decay_date/null-val/epoch/>now-{days}/format/3le"
+
+    print("Downloading all in-orbit TLE data (3LE format) …")
+    resp = session.get(URL_ALL_TLE, stream=True)
+    if resp.status_code != 200:
+        raise Exception(f"Failed to fetch TLE data: HTTP {resp.status_code}")
+    
+    # 保存文件
+    output_file = os.path.join(OUTPUT_DIR, FILENAME)
+    with open(output_file, "w", encoding="utf-8") as f:
+        for chunk in resp.iter_content(chunk_size=1024):
+            if chunk:
+                f.write(chunk.decode("utf-8"))
+    
+    print(f"All TLE data saved to {output_file}")
+
 
 def login_session():
     """
@@ -152,11 +179,12 @@ def main():
 
     print("请选择获取方式：")
     print("1 - 批量获取全部轨道目标的TLE")
-    print("2 - 批量获取在轨存活卫星的TLE")
-    print("3 - 获取指定 NORAD ID 的 TLE")
+    print("2 - 批量获取在days天内更新的全部轨道目标的TLE")
+    print("3 - 批量获取在轨存活卫星的TLE")
+    print("4 - 获取指定 NORAD ID 的 TLE")
 
-    choice = input("请输入 1/2/3: ").strip()
-
+    choice = input("请输入 1/2/3/4: ").strip()
+    
     if choice == "1":
         try:
             session = login_session()
@@ -174,12 +202,34 @@ def main():
 
     elif choice == "2":
         try:
+            session = login_session()
+        except Exception as e:
+            print(f"Login error: {e}", file=sys.stderr)
+            return
+
+        days_input = input("请输入整数天数 (如10): ").strip()
+        try:
+            days = int(days_input)
+        except ValueError:
+            print("输入格式错误，请输入整数天数")
+            return
+
+        try:
+            fetch_all_tle_days(session, days)
+        except Exception as e:
+            print(f"Error fetching TLE for last {days} days: {e}", file=sys.stderr)
+        finally:
+            session.close()
+        print("Done.")
+
+    elif choice == "3":
+        try:
             fetch_active_tle()
         except Exception as e:
             print(f"Error fetching active satellite TLE: {e}", file=sys.stderr)
         print("Done.")
 
-    elif choice == "3":
+    elif choice == "4":
 
         ids_input = input("请输入 NORAD ID(多个用空格分隔): ").strip()  #如48274 68110 68103 68115 68116 68104 68106
 
