@@ -1,0 +1,6 @@
+{
+    "python-envs.workspaceSearchPaths": [
+        "./**/.venv",
+        "D:\\Tsinghua\\Code\\PyProj\\env"
+    ]
+}

@@ -1,0 +1,2 @@
+GeometryMethod_threshold: 15.0
+GeometryMethod_Day: 7

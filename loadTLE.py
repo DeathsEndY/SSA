@@ -68,8 +68,8 @@ def login_session():
     并返回已认证的 requests.Session() 对象
     """
     # 用户账号&密码配置
-    USERNAME   = "xxxx"
-    PASSWORD   = "xxxx"
+    USERNAME   = "1697399923@qq.com"
+    PASSWORD   = "1697399923thuYJ!"
 
     # 登录 URL
     LOGIN_URL = "https://www.space-track.org/ajaxauth/login"

@@ -66,3 +66,6 @@ tle_data = load_tle_from_txt("data/active_tle.txt")
 - 下载全部TLE数据需要Space-Track账号，地址https://www.space-track.org/，请在`loadTLE.py`中配置用户名和密码。目前函数中我已经隐去账号密码，需要注册后添加
 - 时间使用UTC格式。
 - 坐标单位：位置为km，速度为km/s。
+
+##
+tartle文件中包含：CSS，ISS，CHINASAT 32 (BEIDOU 1),CHINASAT 31 (BEIDOU 1B),BEIDOU 2
