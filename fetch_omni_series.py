@@ -1,3 +1,4 @@
+# 电磁部分计算函数 -ljh
 # pip install -U cdasws cdflib xarray pandas matplotlib
 
 import warnings

@@ -1,7 +1,8 @@
-# TLE数据获取&SGP4方法轨道递推
+# SSA-Python
 
 ## 代码描述
 
+基于Python的进行太空安全管理计算的项目程序。
 包含基于Python的卫星轨道计算工具，使用TLE（Two-Line Element）数据和SGP4算法计算卫星在指定时刻的位置和速度，并将其转换为地球固定坐标系（ECF）。
 
 主要功能包括：
@@ -50,7 +51,7 @@ from loadTLE import load_tle_from_txt
 tle_data = load_tle_from_txt("data/active_tle.txt")
 ```
 
-## 文件结构
+## 文件结构及部分重要
 
 - `main.py`: 主程序，演示单个卫星位置计算
 - `sgp_wrapper.py`: SGP4算法封装，计算卫星位置和速度
@@ -60,6 +61,7 @@ tle_data = load_tle_from_txt("data/active_tle.txt")
   - `active_tle.txt`: 在轨存活卫星TLE数据
   - `all_tle.txt`: 全部轨道目标TLE数据
   - `part_tle.txt`: 指定卫星TLE数据（48274 68110 68103 68115 68116）
+- `PcCalculate.py`: 计算两个目标碰撞概率的函数
 
 ## 注意！
 

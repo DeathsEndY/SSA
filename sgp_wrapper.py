@@ -11,9 +11,9 @@ def satellite_rv_at_time(sat_tle, time: datetime.datetime):
             }
         time: 一个 datetime.datetime 对象（UTC）
     返回：
-        (r, v) - TEME (True Equator Mean Equinox) 坐标系: 
-            r: 列表 [x, y, z] 表示位置（单位：km）
-            v: 列表 [vx, vy, vz] 表示速度（单位：km/s）
+        (r, v) - TEME (True Equator Mean Equinox) 坐标系下: 
+            r: 位置列表 [x, y, z] （单位：km）
+            v: 速度列表 [vx, vy, vz] （单位：km/s）
     """
     # 用 TLE 行生成一个卫星记录对象
     satrec = Satrec.twoline2rv(sat_tle["line1"], sat_tle["line2"])

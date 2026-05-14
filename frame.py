@@ -3,6 +3,20 @@
 """
 
 import math
+import numpy as np
+
+# 基础的三维坐标轴旋转矩阵 (被动旋转/坐标系旋转)
+
+def rotation_x(theta):
+    """
+    绕X轴旋转 theta 弧度
+    """
+    c, s = np.cos(theta), np.sin(theta)
+    return np.array([
+        [1, 0, 0],
+        [0, c, s],
+        [0, -s, c]
+    ])
 
 def teme_to_ecf(r_teme, jd, fr):
     """
@@ -21,3 +35,10 @@ def teme_to_ecf(r_teme, jd, fr):
     z_ecf = r_teme[2]
     
     return [x_ecf, y_ecf, z_ecf]
+
+def teme_to_eci(r_teme, jd, fr):
+    """
+    将 TEME (True Equator Mean Equinox) 坐标转换为 ECI (Earth-Centered Inertial) 坐标
+
+    """
+    return r_teme

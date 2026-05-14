@@ -5,9 +5,10 @@ from frame import teme_to_ecf
 from sgp_wrapper import satellite_rv_at_time
 from sgp4.api import Satrec, jday
 
-def main():
+def main_1():
     """
-    主函数, 给定单个卫星的tle数据，输出在ECF (Earth-Centered Fixed)地球固定坐标系的坐标
+    主函数1（轨迹绘制）：
+         给定单个卫星的tle数据，输出在ECF (Earth-Centered Fixed)地球固定坐标系的坐标
     """
     # 给定卫星tle
     sat_tle = {
@@ -22,8 +23,8 @@ def main():
 
     # 转换到地球固定坐标系
     r_ecf = teme_to_ecf(r_teme, jd, fr)
-    print("地固系下卫星位置为 r (km):", r_ecf)
+    print("ECF地固系下卫星位置为 r (km):", r_ecf)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main_1())

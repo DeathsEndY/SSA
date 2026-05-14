@@ -1,11 +1,27 @@
 """
-碰撞概率计算函数。由Matlab程序改写
-v1.0 -- YSH
+碰撞概率计算函数。由Matlab程序改写  
+v1.0 -- YSH 202604
+v2.0 加入协方差估计 -- 202605
 """
 
 import numpy as np
+import datetime
 from numpy.linalg import norm, eig
 from scipy.integrate import dblquad
+from sgp4.api import Satrec
+from sgp4.api import jday
+from sgp_wrapper import satellite_rv_at_time
+from skyfield.api import load, EarthSatellite
+import matplotlib.pyplot as plt
+
+# RTN坐标系下的经验位置误差（km），后续可调整
+EMPIRICAL_ERRORS = [1.0, 5.0, 1.0]
+# 硬体半径（Hard Body Region, HBR），单位 km，后续可调整
+HBR = 0.15
+# 相对容差（Relative Tolerance）用于数值积分的收敛判断，后续可调整
+RELTOL = 1e-10
+# 硬体区域类型，'circle'、'square'、'squareEquArea'
+HBR_TYPE = "square" 
 
 # 对应 CovRemEigValClip.m
 def cov_rem_eig_val_clip(Araw, Lclip=0.0, Lraw=None, Vraw=None):
@@ -69,8 +85,6 @@ def cov_rem_eig_val_clip(Araw, Lclip=0.0, Lraw=None, Vraw=None):
 # 对应 Pc2D_Foster.m
 def pc2d_foster(r1, v1, cov1, r2, v2, cov2, HBR, RelTol=1e-8, HBRType="circle"):
     """
-    说明（Description）
-    -------------------
     按照 Foster 方法计算二维碰撞概率（2D Pc）。
 
     该函数支持三种不同的硬体区域（Hard Body Region, HBR）形状：
@@ -202,35 +216,157 @@ def pc2d_foster(r1, v1, cov1, r2, v2, cov2, HBR, RelTol=1e-8, HBRType="circle"):
 
     return Pc, Arem, True, is_remediated
 
-# -------------------------------------------------------------------
-# 碰撞概率计算（r1,v1,cov1,r2,v2,cov2，HBR代入自己算例的数据）
-r1 = np.array([2134.70569701, -5160.26704941, 3811.54902792])
-v1 = np.array([7.13392701, 0.97049, -2.67128116])
+def tle_to_rv(tle):
+    """
+    将 TLE 转换为位置和速度向量（r, v）。
+    使用了 SGP4 库来解析 TLE 数据。
+    """
+    # 解析 TLE
+    sat = Satrec.twoline2rv(tle[0], tle[1])
 
-cov1 = np.array([
-    [1.9760,  0.2348, -0.6463],
-    [0.2348,  0.2819, -0.0879],
-    [-0.6463, -0.0879, 0.4920]
-])
+    # 获取当前时间的 Julian Date
+    jd, fr = jday(2024, 6, 1, 0, 0, 0)
 
-r2 = np.array([2124.70569701, -5160.26704941, 3811.54902792])
-v2 = 1.0e+04 * np.array([1.2323, -3.4336, -0.6110]) / 1e3
-cov2 = np.array([
-    [1.9760,  0.2348, -0.6463],
-    [0.2348,  0.2819, -0.0879],
-    [-0.6463, -0.0879, 0.4920]
-])
+    # 计算位置和速度
+    e, r, v = sat.sgp4(jd, fr)
 
-HBR = 0.03
-RelTol = 1e-8
-HBRType = "circle"
+    if e != 0:
+        raise RuntimeError("Error in SGP4 propagation")
 
-Pc, Cp, isPD, isRem = pc2d_foster(
-    r1, v1, cov1,
-    r2, v2, cov2,
-    HBR=HBR,
-    RelTol=RelTol,
-    HBRType=HBRType
-)
+    return np.array(r), np.array(v)
 
-print(f"Pc = {Pc:.12e}")
+def calculate_rtn_to_eci_rotation(r, v):
+    """
+    根据ECI坐标系下的位置（r）和速度（v）
+    计算从RTN（径向、横向、法向）坐标系到ECI坐标系的旋转矩阵.
+    """
+    # 径向单位向量（从地心指向卫星的方向）
+    u_R = r / np.linalg.norm(r)
+    
+    # 法向单位向量（垂直于轨道平面）
+    h = np.cross(r, v)
+    u_N = h / np.linalg.norm(h)
+    
+    # 横向单位向量（沿轨道方向，右手坐标系）
+    u_T = np.cross(u_N, u_R)
+    
+    # 得到从 RTN系到 ECI系的旋转矩阵
+    R = np.column_stack((u_R, u_T, u_N))
+    return R
+
+def generate_covariance_matrix(r1_eci, v1_eci, r2_eci, v2_eci, rtn_errors_km=[1.0, 5.0, 1.0]):
+    """
+    在 ECI 坐标系下生成3x3的位置协方差矩阵.
+    """
+    # 1. 在RTN坐标系下定义经验协方差矩阵，采用给定的固定经验值
+    # 假设误差是以 km 为单位的标准差（sigma）
+    # 方差 = sigma^2。假设没有交叉相关性。
+    sigma_r, sigma_t, sigma_n = rtn_errors_km
+    
+    cov_RTN = np.array([
+        [sigma_r**2, 0,          0],
+        [0,          sigma_t**2, 0],
+        [0,          0,          sigma_n**2]
+    ])
+    
+    # 2. 计算从RTN到ECI的旋转矩阵
+    R1 = calculate_rtn_to_eci_rotation(r1_eci, v1_eci)
+    R2 = calculate_rtn_to_eci_rotation(r2_eci, v2_eci)
+    
+    # 3. 将RTN协方差矩阵旋转到ECI坐标系：P_ECI = R * P_RTN * R^T
+    cov_eci1 = R1 @ cov_RTN @ R1.T
+    cov_eci2 = R2 @ cov_RTN @ R2.T
+
+    return cov_eci1, cov_eci2
+
+def tle_to_pc_at_time(sat1_tle, sat2_tle, t, rtn_errors_km=[1.0, 5.0, 1.0], hbr=0.03, reltol=1e-8, hbr_type="circle"):
+    """
+    计算在给定时刻t，两颗卫星（sat1和sat2）的碰撞概率Pc。
+    输入：
+    sat1_tle, sat2_tle : 两颗卫星的TLE数据，格式为字典，包含 "name", "tle1", "tle2"
+    t : 目标时刻，datetime对象
+    rtn_errors_km : RTN坐标系下的经验位置误差（km），列表或数组，格式为 [sigma_r, sigma_t, sigma_n]
+    输出：
+    Pc : 碰撞概率
+    """
+    # # 先转成TEME系的方法，暂时不使用
+    # # 1. 获取两卫星在 TEME 坐标系下的位置和速度
+    # r1_teme = satellite_rv_at_time(sat1_tle, t)
+    # v1_teme = satellite_rv_at_time(sat1_tle, t)
+    # r2_teme = satellite_rv_at_time(sat2_tle, t)
+    # v2_teme = satellite_rv_at_time(sat2_tle, t)
+    # # 2. 将 TEME 坐标系下的位置和速度转换为 ECI 坐标系
+
+    # 1. 使用skyfield库计算两卫星在 ECI (Earth-Centered Inertial，地球固定坐标系) 下的位置和速度
+    
+    # 加载 Skyfield 的时间系统
+    ts = load.timescale()
+
+    # 初始化 EarthSatellite 对象
+    satellite1 = EarthSatellite(sat1_tle["tle1"], sat1_tle["tle2"], sat1_tle["name"], ts)
+    satellite2 = EarthSatellite(sat2_tle["tle1"], sat2_tle["tle2"], sat2_tle["name"], ts)
+
+    # 获取目标时刻的 Skyfield 时间对象
+    t_sf = ts.utc(t.year, t.month, t.day, t.hour, t.minute, t.second)
+
+    # 计算两卫星在目标时刻的 ECI 坐标和速度
+    geocentric1 = satellite1.at(t_sf)
+    geocentric2 = satellite2.at(t_sf)
+    r1_eci = geocentric1.position.km
+    v1_eci = geocentric1.velocity.km_per_s
+    r2_eci = geocentric2.position.km
+    v2_eci = geocentric2.velocity.km_per_s
+
+    # 2. 计算两卫星在 ECI 坐标系下的位置协方差矩阵cov1和cov2
+    cov1, cov2 = generate_covariance_matrix(r1_eci, v1_eci, r2_eci, v2_eci, rtn_errors_km)
+
+    # 3. 计算碰撞概率 Pc
+    Pc, _, is_pos_def, is_remediated = pc2d_foster(r1_eci, v1_eci, cov1, r2_eci, v2_eci, cov2, HBR=hbr, RelTol=reltol, HBRType=hbr_type)
+
+    return Pc
+
+if __name__ == "__main__":
+    """
+    示例：碰撞概率计算（r1,v1,cov1,r2,v2,cov2，HBR代入自己算例的数据）
+    参数：sat1_tle, sat2_tle, 目标时刻
+    输出：该时刻碰撞概率
+    """
+
+    # 目标1：STARLINK-3809 - 52851
+    sat1_tle = {
+        "name": "STARLINK-3809",
+        "tle1": "1 52851U 22062X   26089.96624807  .00000045  00000-0  20931-4 0  9998",
+        "tle2": "2 52851  53.2169 288.6068 0001274  89.8700 270.2438 15.08839245209139"
+    }
+
+    # 目标2：OBJECT T - 43775
+    sat2_tle = {
+        "name": "OBJECT T - 43775",
+        "tle1": "1 43775U 18099T   26090.08321991  .00005708  00000-0  35881-3 0  9991",
+        "tle2": "2 43775  97.4298 136.7548 0004620 223.1343 136.9525 15.09611681400532"
+    }
+
+    # 目标时刻
+    t = datetime.datetime(2026, 4, 1, 13, 35, 58)
+    # 计算碰撞概率函数
+    Pc = tle_to_pc_at_time(sat1_tle, sat2_tle, t, EMPIRICAL_ERRORS, HBR, RELTOL, HBR_TYPE)
+
+    print(f"在时刻 {t} 的Pc = {Pc:.12e}")
+    print()
+
+    time_offsets = np.arange(-1, 1.1, 0.1)  # 从-1到1，每0.1s
+    pc_values = []
+
+    for dt in time_offsets:
+        current_t = t + datetime.timedelta(seconds=dt)
+        pc = tle_to_pc_at_time(sat1_tle, sat2_tle, current_t, EMPIRICAL_ERRORS, HBR, RELTOL, HBR_TYPE)
+        pc_values.append(pc)
+
+    # 画图
+    plt.figure(figsize=(10, 6))
+    plt.plot(time_offsets, pc_values, marker='o')
+    plt.xlabel('Time Offset (seconds)')
+    plt.ylabel('Collision Probability (Pc)')
+    plt.title('Collision Probability vs Time Offset')
+    plt.grid(True)
+    plt.show()
