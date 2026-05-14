@@ -1,18 +1,18 @@
 """
-碰撞概率计算函数。由Matlab程序改写  
-v1.0 -- YSH 202604
-v2.0 加入协方差估计 -- 202605
+碰撞概率计算函数。基础计算部分由Matlab程序改写  
+v1.0 Foster方法碰撞概率-- YSH 202604
+v2.0 加入协方差估计
+v2.1 加入时间范围内的最大概率搜索
 """
 
 import numpy as np
 import datetime
+import time
+from datetime import timezone
 from numpy.linalg import norm, eig
 from scipy.integrate import dblquad
-from sgp4.api import Satrec
-from sgp4.api import jday
-from sgp_wrapper import satellite_rv_at_time
+from scipy.optimize import minimize_scalar
 from skyfield.api import load, EarthSatellite
-import matplotlib.pyplot as plt
 
 # RTN坐标系下的经验位置误差（km），后续可调整
 EMPIRICAL_ERRORS = [1.0, 5.0, 1.0]
@@ -81,7 +81,6 @@ def cov_rem_eig_val_clip(Araw, Lclip=0.0, Lraw=None, Vraw=None):
 
     return Lrem, Lraw, Vraw, pos_def_status, clip_status, Adet, Ainv, Arem
 
-
 # 对应 Pc2D_Foster.m
 def pc2d_foster(r1, v1, cov1, r2, v2, cov2, HBR, RelTol=1e-8, HBRType="circle"):
     """
@@ -124,10 +123,10 @@ def pc2d_foster(r1, v1, cov1, r2, v2, cov2, HBR, RelTol=1e-8, HBRType="circle"):
     IsRemediated : 标志位，表示组合并降维后的协方差是否经过特征值裁剪修复
     """
 
-    # Combined position covariance
+    # 联合位置协方差
     covcomb = cov1[:3, :3] + cov2[:3, :3]
 
-    # Relative encounter frame
+    # 相对交会坐标系
     r = r1 - r2
     v = v1 - v2
     h = np.cross(r, v)
@@ -136,7 +135,7 @@ def pc2d_foster(r1, v1, cov1, r2, v2, cov2, HBR, RelTol=1e-8, HBRType="circle"):
     z = h / norm(h)
     x = np.cross(y, z)
 
-    # Transform from ECI to relative encounter plane
+    # 从 ECI 坐标系转换至相对交会平面
     eci2xyz = np.vstack((x, y, z))
     covcombxyz = eci2xyz @ covcomb @ eci2xyz.T
 
@@ -215,25 +214,6 @@ def pc2d_foster(r1, v1, cov1, r2, v2, cov2, HBR, RelTol=1e-8, HBRType="circle"):
     Pc = (1.0 / (2.0 * np.pi)) * (1.0 / np.sqrt(Adet)) * integral
 
     return Pc, Arem, True, is_remediated
-
-def tle_to_rv(tle):
-    """
-    将 TLE 转换为位置和速度向量（r, v）。
-    使用了 SGP4 库来解析 TLE 数据。
-    """
-    # 解析 TLE
-    sat = Satrec.twoline2rv(tle[0], tle[1])
-
-    # 获取当前时间的 Julian Date
-    jd, fr = jday(2024, 6, 1, 0, 0, 0)
-
-    # 计算位置和速度
-    e, r, v = sat.sgp4(jd, fr)
-
-    if e != 0:
-        raise RuntimeError("Error in SGP4 propagation")
-
-    return np.array(r), np.array(v)
 
 def calculate_rtn_to_eci_rotation(r, v):
     """
@@ -325,13 +305,129 @@ def tle_to_pc_at_time(sat1_tle, sat2_tle, t, rtn_errors_km=[1.0, 5.0, 1.0], hbr=
 
     return Pc
 
-if __name__ == "__main__":
+def find_tca_and_max_pc(sat1_tle, sat2_tle, start_time, end_time, step_sec=10.0, 
+                        rtn_errors_km=[1.0, 5.0, 1.0], hbr=0.15, reltol=1e-8, hbr_type="square"):
     """
-    示例：碰撞概率计算（r1,v1,cov1,r2,v2,cov2，HBR代入自己算例的数据）
+    在给定的时间窗口内，以较低的时间复杂度寻找两颗卫星的最大碰撞概率及其发生时刻。
+    三阶段精确寻优算法
+    
+    参数:
+    sat1_tle, sat2_tle: TLE 字典数据
+    start_time: 开始时刻 (datetime 对象)
+    end_time: 结束时刻 (datetime 对象)
+    step_sec: 粗搜步长(秒)，如10-30秒，足以捕捉低轨卫星交会。
+    """
+    ts = load.timescale()
+    sat1 = EarthSatellite(sat1_tle["tle1"], sat1_tle["tle2"], sat1_tle["name"], ts)
+    sat2 = EarthSatellite(sat2_tle["tle1"], sat2_tle["tle2"], sat2_tle["name"], ts)
+
+    # 确保时间带有 UTC 时区，以便 Skyfield 批量处理
+    if start_time.tzinfo is None:
+        start_time = start_time.replace(tzinfo=timezone.utc)
+    if end_time.tzinfo is None:
+        end_time = end_time.replace(tzinfo=timezone.utc)
+
+    total_seconds = (end_time - start_time).total_seconds()
+    if total_seconds <= 0:
+        raise ValueError("结束时间必须晚于开始时间")
+
+    # ==========================================
+    # 步骤 1: 向量化粗搜 (寻找最近距离粗略极小值)
+    # ==========================================
+    # 生成时间数组
+    offsets = np.arange(0, total_seconds, step_sec)
+    dt_list = [start_time + datetime.timedelta(seconds=float(s)) for s in offsets]
+    t_array = ts.from_datetimes(dt_list)
+
+    # 批量计算位置并求距离
+    r1_array = sat1.at(t_array).position.km
+    r2_array = sat2.at(t_array).position.km
+    distances = np.linalg.norm(r1_array - r2_array, axis=0)
+
+    # 找到距离最近的索引
+    min_idx = np.argmin(distances)
+    coarse_tca = dt_list[min_idx]
+    coarse_min_dist = distances[min_idx]
+
+    # 安全距离阈值提前阻断
+    # LEO 极限相对速度不到 15km/s，使用 20km/s 作为安全裕度
+    threshold_dist = 20.0 * step_sec
+    if coarse_min_dist > threshold_dist:
+        # 直接返回粗搜结果，此时碰撞概率在物理上视为 0
+        coarse_tca_naive = coarse_tca.replace(tzinfo=None)
+        return coarse_tca_naive, 0.0, coarse_min_dist
+
+    # ==========================================
+    # 步骤 2: 局部精细寻优 (寻找精确的 TCA 时刻)
+    # ==========================================
+    def distance_at_offset(offset):
+        """目标函数：输入相对于 coarse_tca 的时间偏移(秒)，返回两星距离"""
+        t_eval = coarse_tca + datetime.timedelta(seconds=offset)
+        t_sf = ts.from_datetime(t_eval)
+        r1 = sat1.at(t_sf).position.km
+        r2 = sat2.at(t_sf).position.km
+        return np.linalg.norm(r1 - r2)
+
+    # 在粗搜点前后各扩展一个步长的范围内，寻找精确极小值点
+    res_dist = minimize_scalar(
+        distance_at_offset, 
+        bounds=(-step_sec, step_sec), 
+        method='bounded',
+        options={'xatol': 1e-1} # 精度达到 0.1 秒即可
+    )
+
+    exact_tca = coarse_tca + datetime.timedelta(seconds=res_dist.x)
+    exact_min_dist = res_dist.fun
+
+    # ==========================================
+    # 阶段 3: 以 TCA 为中心，精细寻优最大碰撞概率 (Max Pc)
+    # ==========================================
+    # 定义搜索窗口：在 TCA 前后 1.5 秒内搜索
+    pc_search_window = 1.5
+    
+    def negative_pc_at_offset(offset):
+            """目标函数：返回负的碰撞概率，以便使用极小值优化算法"""
+            t_eval = exact_tca + datetime.timedelta(seconds=offset)
+            t_eval_naive = t_eval.replace(tzinfo=None)
+            try:
+                # 调用你原有的计算单点Pc的函数
+                pc = tle_to_pc_at_time(
+                    sat1_tle, sat2_tle, t_eval_naive, 
+                    rtn_errors_km=rtn_errors_km, hbr=hbr, reltol=reltol, hbr_type=hbr_type
+                )
+                return -pc  # scipy.optimize 只找最小值，所以加负号
+            except Exception as e:
+                # 如果某时刻协方差非正定抛出异常，视为概率0
+                return 0.0
+
+    # 寻找负Pc的极小值（即Pc的极大值）
+    res_pc = minimize_scalar(
+        negative_pc_at_offset,
+        bounds=(-pc_search_window, pc_search_window),
+        method='bounded',
+        options={'xatol': 1e-1}  # 寻找概率峰值，0.1秒的精度已足够
+    )
+
+    max_pc_time = exact_tca + datetime.timedelta(seconds=res_pc.x)
+    max_pc_val = -res_pc.fun
+    max_pc_time_naive = max_pc_time.replace(tzinfo=None)
+    exact_tca_naive = exact_tca.replace(tzinfo=None)
+
+    # 顺便计算 Max Pc 发生时刻的几何距离，供参考
+    dist_at_max_pc = distance_at_offset(res_dist.x + res_pc.x)
+
+    return max_pc_time_naive, max_pc_val, dist_at_max_pc, exact_tca_naive, exact_min_dist
+
+
+if __name__ == "__main__":
+    
+    """
+    示例1：单碰撞概率计算（r1,v1,cov1,r2,v2,cov2，HBR代入自己算例的数据）
     参数：sat1_tle, sat2_tle, 目标时刻
     输出：该时刻碰撞概率
     """
 
+    # 示例计算
     # 目标1：STARLINK-3809 - 52851
     sat1_tle = {
         "name": "STARLINK-3809",
@@ -351,22 +447,41 @@ if __name__ == "__main__":
     # 计算碰撞概率函数
     Pc = tle_to_pc_at_time(sat1_tle, sat2_tle, t, EMPIRICAL_ERRORS, HBR, RELTOL, HBR_TYPE)
 
-    print(f"在时刻 {t} 的Pc = {Pc:.12e}")
-    print()
+    print("="*50 )
+    print(f"在时刻 {t} 的碰撞概率 Pc = {Pc:.12e}")
+    print("="*50)
 
-    time_offsets = np.arange(-1, 1.1, 0.1)  # 从-1到1，每0.1s
-    pc_values = []
+    """
+    示例2：在给定时间窗口内寻找最大碰撞概率及其发生时刻
+    参数：sat1_tle, sat2_tle, start_time, end_time, step_sec, rtn_errors_km, hbr, reltol, hbr_type
+    输出：最大碰撞概率发生的时刻，最大碰撞概率值，以及该时刻的最短相对距离
+    """
+    # 定义我们要搜索的时间窗口 (例如：2026年4月1日 13:00 到 14:00 这一个小时内)
+    # 记录程序用时
+    t1 = time.time()
+    start_time = datetime.datetime(2026, 4, 1, 8, 0, 0)
+    end_time = datetime.datetime(2026, 4, 1, 20, 0, 0)
 
-    for dt in time_offsets:
-        current_t = t + datetime.timedelta(seconds=dt)
-        pc = tle_to_pc_at_time(sat1_tle, sat2_tle, current_t, EMPIRICAL_ERRORS, HBR, RELTOL, HBR_TYPE)
-        pc_values.append(pc)
+    print(f"开始搜索分析窗口: {start_time} 到 {end_time} ...")
+    
+    # 调用优化算法寻找最大概率
+    max_pc_time, max_pc, dist_at_max_pc, exact_tca, exact_min_dist = find_tca_and_max_pc(
+        sat1_tle, sat2_tle, start_time, end_time, 
+        step_sec=10.0, 
+        rtn_errors_km=EMPIRICAL_ERRORS, 
+        hbr=HBR, 
+        reltol=RELTOL, 
+        hbr_type=HBR_TYPE
+    )
 
-    # 画图
-    plt.figure(figsize=(10, 6))
-    plt.plot(time_offsets, pc_values, marker='o')
-    plt.xlabel('Time Offset (seconds)')
-    plt.ylabel('Collision Probability (Pc)')
-    plt.title('Collision Probability vs Time Offset')
-    plt.grid(True)
-    plt.show()
+    t2 = time.time()
+    print("="*50)
+    print(f"分析结果完成！总用时: {t2 - t1:.2f} 秒")
+    print(f"▶ 纯几何最短距离时刻 (TCA) : {exact_tca}")
+    print(f"  -> 此时几何距离        : {exact_min_dist:.5f} km")
+    print("-" * 60)
+    print(f"▶ 真正的最大碰撞概率时刻   : {max_pc_time}")
+    print(f"  -> 偏离几何 TCA 时间带   : {(max_pc_time - exact_tca).total_seconds():.4f} 秒")
+    print(f"  -> 该时刻的几何距离      : {dist_at_max_pc:.5f} km")
+    print(f"  -> ⭐ 最大碰撞概率 (Max Pc): {max_pc:.12e}")
+    print("="*50)
